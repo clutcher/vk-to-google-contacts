@@ -1,13 +1,17 @@
-﻿import vkontakte
+﻿# -*- coding: utf-8 -*-
+import vkontakte
 
 import gdata.data
 import gdata.gauth
 import gdata.contacts.client
 import gdata.contacts.data
+import atom
 
 #Google
 email = ''
 password = ''
+groupName = 'VK'
+numberOfContacts = '1000'
 
 #VK
 #URL for getting token http://oauth.vk.com/authorize?client_id=2859200&scope=friends&response_type=token
@@ -16,7 +20,8 @@ tokenVK = ''
 #If Ukraine, make it 1
 ukraine = 0
 
-def transform_phone(phone):
+
+def TransformPhone(phone):
     if len(phone) < 5:
         return 0
     phone.replace('-', '')
@@ -43,7 +48,7 @@ def transform_phone(phone):
         return 0
 
 
-def transform_birthday(date):
+def TransformBirthday(date):
     if len(date) > 5:
         year = date[date.rfind('.') + 1:]
         month = date[date.find('.') + 1:date.rfind('.')]
@@ -63,6 +68,35 @@ def transform_birthday(date):
         gDate = '--' + month + '-' + day
 
     return gDate
+
+
+def makeStr(data):
+    return data.encode('utf-8')
+
+
+def GetIndex(seq, attribute, value):
+    return next(index for (index, d) in enumerate(seq) if d[attribute] == value)
+
+
+def CheckVkGroup(gd_client):
+    feed = gd_client.GetGroups()
+    for entry in feed.entry:
+        if makeStr(entry.title.text) == groupName:
+            return entry.id.text
+    return 0
+
+
+def CreateVkGroup(gd_client):
+    new_group = gdata.contacts.data.GroupEntry(title=atom.data.Title(text=groupName))
+    created_group = gd_client.CreateGroup(new_group)
+    return created_group
+
+
+def GetAllContacts(gd_client):
+    query = gdata.contacts.client.ContactsQuery()
+    query.max_results = numberOfContacts
+    feed = gd_client.GetContacts(q=query)
+    return feed.entry
 
 
 def downloadPhoto(url, file_name):
@@ -87,34 +121,39 @@ def removeLocalPhoto(file_name):
     remove(file_name)
 
 
-def create_contact(gd_client, record):
+def UpdateContact(gd_client, contact, friend, vkGroup):
 
-    new_contact = gdata.contacts.data.ContactEntry()
+    #Set the contact's phone numbers.
+    if ('mobile_phone' in friend) and (friend['mobile_phone'] != 0):
+        contact.phone_number.append(gdata.data.PhoneNumber(text=friend['mobile_phone'],
+                                                           rel=gdata.data.WORK_REL, primay='true'))
+    if ('home_phone' in friend) and (friend['home_phone'] != 0):
+        contact.phone_number.append(gdata.data.PhoneNumber(text=friend['home_phone'],
+                                                           rel=gdata.data.HOME_REL))
+    if 'bdate' in friend:
+        contact.birthday = gdata.contacts.data.Birthday(when=friend['bdate'])
 
-    # Set the contact's name.
-    name = record['first_name'] + u' ' + record['last_name']
-    new_contact = gdata.contacts.data.ContactEntry(name=gdata.data.Name(full_name=gdata.data.FullName(text=name)))
+    #Set Group for VK friends
+    contact.group_membership_info.append(gdata.contacts.data.GroupMembershipInfo(href=vkGroup))
 
-    # Set the contact's phone numbers.
-    if record['mobile_phone'] != 0:
-        new_contact.phone_number.append(gdata.data.PhoneNumber(text=record['mobile_phone'],
-            rel=gdata.data.WORK_REL, primay='true'))
-    if record['home_phone'] != 0:
-        new_contact.phone_number.append(gdata.data.PhoneNumber(text=record['home_phone'],
-            rel=gdata.data.HOME_REL))
-
-    # Set birthday
-    if 'bdate' in record:
-        new_contact.birthday = gdata.contacts.data.Birthday(when=record['bdate'])
-
-    # Send the contact data to the server.
-    contact_entry = gd_client.CreateContact(new_contact)
+    #Push changes to Google
+    gd_client.Update(contact)
 
     #Download photo from vk, add to google, remove from local computer
-    local_image_filename = record['photo_big'][record['photo_big'].rfind('/') + 1:]
-    downloadPhoto(record['photo_big'], local_image_filename)
-    gd_client.ChangePhoto(local_image_filename, contact_entry, content_type='image/jpeg')
+    local_image_filename = friend['photo_big'][friend['photo_big'].rfind('/') + 1:]
+    downloadPhoto(friend['photo_big'], local_image_filename)
+    gd_client.ChangePhoto(local_image_filename, contact, content_type='image/jpeg')
     removeLocalPhoto(local_image_filename)
+
+
+def CreateContact(gd_client, friend, vkGroup):
+
+    new_contact = gdata.contacts.data.ContactEntry()
+    name = friend['full_name']
+    new_contact = gdata.contacts.data.ContactEntry(name=gdata.data.Name(full_name=gdata.data.FullName(text=name)))
+    contact = gd_client.CreateContact(new_contact)
+
+    UpdateContact(gd_client, contact, friend, vkGroup)
 
 
 if __name__ == '__main__':
@@ -123,36 +162,60 @@ if __name__ == '__main__':
     gd_client = gdata.contacts.client.ContactsClient(source='Export contacts to Google')
     gd_client.ClientLogin(email, password, gd_client.source)
 
+    #Get contacts
+    googleContacts = GetAllContacts(gd_client)
+    print "Received Google Contacs"
+
     #VK authorization
     vk = vkontakte.API('2859200', 'Uq9YfuXTq8RUZbrGNnEP')
     vk = vkontakte.API(token=tokenVK)
 
     #Get list of VK friends
-    friends = vk.friends.get(fields = "first_name, last_name, bdate, contacts, photo_big", order = 'name')
+    friends = vk.friends.get(fields="first_name, last_name, bdate, contacts, photo_big", order='name')
+    print "Received VK friends"
 
-    iter = 1
-    end = str(len(friends))
-    #Add VK friends to Google
+    #Create group in Google Contacs for VK if not exist
+    vkGroup = CheckVkGroup(gd_client)
+    if not vkGroup:
+        CreateVkGroup(gd_client)
+        vkGroup = CheckVkGroup(gd_client)
+
+    #Make list of VK friends more useful
+    vkFriendsName = []
     for record in friends:
-
-        print str(iter) + ' from ' + end
-        iter += 1
-
-        #VK answers only available fields
-        if 'home_phone' in record:
-            record['home_phone'] = transform_phone(record['home_phone'])
-        else:
-            record['home_phone'] = 0
-
-        if 'mobile_phone' in record:
-            record['mobile_phone'] = transform_phone(record['mobile_phone'])
-        else:
-            record['mobile_phone'] = 0
+        record['full_name'] = record['first_name'] + u' ' + record['last_name']
 
         if 'bdate' in record:
-            record['bdate'] = transform_birthday(record['bdate'])
+            record['bdate'] = TransformBirthday(record['bdate'])
+        if 'home_phone' in record:
+            record['home_phone'] = TransformPhone(record['home_phone'])
+        if 'mobile_phone' in record:
+            record['mobile_phone'] = TransformPhone(record['mobile_phone'])
 
-        #If contact has phone, we add it
-        #Comment the line below, to add all vk friends to google contacts
-        if record['home_phone'] or record['mobile_phone']:
-            create_contact(gd_client, record)
+        del record['first_name']
+        del record['last_name']
+        del record['uid']
+        del record['online']
+        vkFriendsName.append(record['full_name'])
+
+    #Update existing contacts
+    for contact in googleContacts:
+        #Some magics, because of retrieving none existed Google contact
+        try:
+            makeStr(contact.name.full_name.text)
+        except:
+            pass
+        else:
+            if contact.name.full_name.text in vkFriendsName:
+                index = GetIndex(friends, 'full_name', contact.name.full_name.text)
+                friend = friends[index]
+                UpdateContact(gd_client, contact, friend, vkGroup)
+                print "Updated: " + makeStr(friend['full_name'])
+                vkFriendsName.remove(friend['full_name'])
+
+    #Create new contacts
+    for name in vkFriendsName:
+        index = GetIndex(friends, 'full_name', name)
+        friend = friends[index]
+        CreateContact(gd_client, friend, vkGroup)
+        print "Created: " + makeStr(friend['full_name'])
